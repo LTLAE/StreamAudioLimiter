@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 mod functions;
 use std::string::ToString;
 use eframe::egui;

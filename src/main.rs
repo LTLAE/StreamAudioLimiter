@@ -12,6 +12,7 @@ struct MainWindow {
     limitation: String, // to check if input is empty, we need to use String here
     message: String,
     file_node_type: String,
+    terminal_output: String, // New field to store terminal outputs
 }
 
 impl MainWindow {
@@ -22,6 +23,7 @@ impl MainWindow {
             limitation: "-14".to_string(), // default value
             message: String::new(),
             file_node_type: String::new(),
+            terminal_output: String::new(), // Initialize the new field
         }
     }
 }
@@ -78,6 +80,9 @@ impl eframe::App for MainWindow {
             // start button and message
             ui.horizontal(|ui| {
                 if ui.button("Start processing").clicked() {
+                    self.terminal_output.clear(); // Clear previous output
+                    self.terminal_output.push_str("=== Processing Started ===\n");
+
                     println!("Start button clicked. Path: {}, {}, Limitation: {}LKFS", &self.selected_path.as_deref().unwrap_or("-14"), self.file_node_type, self.limitation);
                     // limitation <- parse input text
                     // when it is not empty (empty means default: -14.0)
@@ -87,6 +92,7 @@ impl eframe::App for MainWindow {
                     // check if limitation is a valid number
                     if let Err(err) = self.limitation.parse::<f32>() {
                         self.message = format!("Invalid input for loudness limitation. Please enter a valid number. {}", err).to_string();
+                        self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
                         return;
                     }
                     // check if ffmpeg path is set
@@ -94,8 +100,10 @@ impl eframe::App for MainWindow {
                         // check if ffmpeg is in PATH
                         if let Ok(ffmpeg_path) = which::which("ffmpeg") {
                             self.ffmpeg_path = ffmpeg_path.display().to_string();
+                            self.terminal_output.push_str(&format!("Found ffmpeg in PATH: {}\n", self.ffmpeg_path));
                         } else {
                             self.message = "Please select ffmpeg binary.".to_string();
+                            self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
                         }
                     }
                     // check if selected path is empty, file or folder
@@ -104,35 +112,59 @@ impl eframe::App for MainWindow {
                             // process single file
                             println!("Processing file: {}", path);
                             self.message = format!("Processing file: {}", path);
-                            match functions::ffmpeg_process(path, &self.ffmpeg_path, self.limitation.parse::<f32>().unwrap()) {
+                            self.terminal_output.push_str(&format!("Processing file: {}\n", path));
+                            match functions::ffmpeg_process(path, &self.ffmpeg_path, self.limitation.parse::<f32>().unwrap(), &mut self.terminal_output) {
                                 Ok(val) => {
                                     self.message = format!("Success: {}", val.to_string());
+                                    self.terminal_output.push_str(&format!("SUCCESS: Processed {}\n", val));
                                 }
                                 Err(err) => {
                                     self.message = format!("Error: {}", err.to_string());
+                                    self.terminal_output.push_str(&format!("ERROR: {}\n", err));
                                 }
                             };   // just unwrap limitation here, because we already checked if limitation is a valid number
                         } else if self.file_node_type == "folder" {
                             // process all files in folder
                             println!("Processing folder: {}", path);
                             self.message = format!("Processing folder: {}", path);
-                            match functions::ffmpeg_process_dir(path, &self.ffmpeg_path, self.limitation.parse::<f32>().unwrap()){
+                            self.terminal_output.push_str(&format!("Processing folder: {}\n", path));
+                            match functions::ffmpeg_process_dir(path, &self.ffmpeg_path, self.limitation.parse::<f32>().unwrap(), &mut self.terminal_output){
                                 Ok(val) => {
                                     self.message = format!("Success: {}", val.to_string());
+                                    self.terminal_output.push_str(&format!("SUCCESS: Processed folder {}\n", val));
                                 },
                                 Err(err) => {
                                     self.message = format!("Error: {}", err.to_string());
+                                    self.terminal_output.push_str(&format!("ERROR: {}\n", err));
                                 }
                             };  // same as above
                         } else {
                             self.message = "Please selected a valid file or folder.".to_string();
+                            self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
                         }
                     } else {
                         self.message = "No file or folder selected.".to_string();
+                        self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
                     }
                 }
                 ui.label(&self.message);
             });
+
+            // Terminal output display box
+            ui.separator();
+            ui.label("Terminal Output:");
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.terminal_output)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(10)
+                            .interactive(false)
+                            .code_editor()
+                    );
+                });
+
         });
 
     }
@@ -153,4 +185,3 @@ fn main() {
         Box::new(|_cc| Ok(Box::new(MainWindow::default()))),
     ).unwrap();
 }
-

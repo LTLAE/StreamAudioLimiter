@@ -4,7 +4,6 @@ use std::env;
 use std::path::Path;
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::Value;
 
 // serde stuffs
 fn str_to_f32<'de, D>(deserializer: D) -> Result<f32, D::Error> where D: serde::Deserializer<'de>,{
@@ -55,32 +54,39 @@ impl MusicLoudness {
 // path is dir in file process (file in dir process): 12
 // Analysis result not exist: err 13
 // ffmpeg normalization failed: err 14
-pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32) -> Result<String, Box<dyn std::error::Error>>{
+pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32, terminal_output: &mut String) -> Result<String, Box<dyn std::error::Error>>{
     let path = Path::new(path); // convert to Path type
-    println!("Current path: {}", env::current_dir().unwrap().display());
+    terminal_output.push_str(&format!("Current working directory: {}\n", env::current_dir().unwrap().display()));
     // if path is not a file, return error
     match fs::metadata(path) {
         Ok(metadata) => {
             if metadata.is_dir() {
-                println!("Input is not a file: {}", path.display());
+                let error_msg = format!("Input is not a file: {}", path.display());
+                terminal_output.push_str(&format!("ERROR: {}\n", error_msg));
                 exit(12);
             }
         }
         Err(_) => {
-            println!("File not found: {}", path.display());
+            let error_msg = format!("File not found: {}", path.display());
+            terminal_output.push_str(&format!("ERROR: {}\n", error_msg));
             exit(11);
         }
     }
     let file_name = path.file_name().unwrap().to_str().unwrap();
     // limit: -18LKFS
     // Analyze the audio file
-    println!("Analyzing audio file: {}", path.display());
+    terminal_output.push_str(&format!("Analyzing audio file: {}\n", path.display()));
     let loudness_result = std::process::Command::new(ffmpeg_path).args([
         "-i", path.to_str().unwrap(),
         "-af", "loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json",
         "-f", "null", "-"
     ])
     .output()?;
+
+    // Convert loudness_result to string for terminal output
+    let strloudness_result = String::from_utf8_lossy(&loudness_result.stderr);
+    terminal_output.push_str(&format!("FFmpeg analysis output:\n{}\n", strloudness_result));
+
     // process output and store them in MusicLoudness struct
     let analysis_result_json = String::from_utf8_lossy(&loudness_result.stderr);  // ffmpeg outputs to stderr, weird fact
     let analysis_result_str = analysis_result_json.as_ref();
@@ -98,19 +104,20 @@ pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32) -> Result<
     let loudness: MusicLoudness = match serde_json::from_str(analysis_result) {
         Ok(loudness) => loudness,
         Err(e) => {
-            println!("Failed to analyze: {}", e);
+            let error_msg = format!("Failed to analyze: {}", e);
+            terminal_output.push_str(&format!("ERROR: {}\n", error_msg));
             return Err(Box::new(e));
         }
-    };;
+    };
 
     // show loudness
     // println!("Loudness analysis result:");
     // loudness.show_loudness();
 
     // if <18, return, else, calculate target gain
-    println!("Loudness analysis complete, loudness: {}", loudness.input_i);
-    if loudness.input_i < -18.0 {
-        println!("Loudness is already below -18 LKFS, no need to adjust.");
+    terminal_output.push_str(&format!("Loudness analysis complete, loudness: {}\n", loudness.input_i));
+    if loudness.input_i < limitation {
+        terminal_output.push_str(&format!("Loudness is already below {} LKFS, no need to adjust.\n", limitation));
         return Ok(path.to_str().unwrap().to_string());
     }
 
@@ -120,10 +127,11 @@ pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32) -> Result<
     let original_file_name = format!("original-{}", file_name);
     let original_path = current_dir.join(&original_file_name);
     fs::rename(path, &original_path).expect("Failed to rename file");
-    println!("Rename: {} -> {}", path.display(), format!("original-{}", path.display()));
+    terminal_output.push_str(&format!("Renamed: {} -> {}\n", path.display(), original_file_name));
 
-    // ffmpeg
-    std::process::Command::new(ffmpeg_path)
+    // ffmpeg normalization
+    terminal_output.push_str(&format!("Starting normalization to {} LKFS...\n", limitation));
+    let normalization_result = std::process::Command::new(ffmpeg_path)
         .args([
             "-i", original_path.to_str().unwrap(),  // input path
             "-af",
@@ -133,36 +141,53 @@ pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32) -> Result<
             ),
             path.to_str().unwrap(), // output path
         ])
-        .status()?;
+        .output()?;
+
+    if normalization_result.status.success() {
+        terminal_output.push_str(&format!("Normalization completed successfully for: {}\n", file_name));
+    } else {
+        let error_output = String::from_utf8_lossy(&normalization_result.stderr);
+        terminal_output.push_str(&format!("Normalization failed: {}\n", error_output));
+    }
+
     Ok(/*return*/path.to_str().unwrap().to_string())    // to string to avoid lifetime issues
 
 }
 
-pub fn ffmpeg_process_dir(path: &str, ffmpeg_path: &str, limitation: f32) -> Result<String, Box<dyn std::error::Error>> {
-    println!("Processing directory: {}", path);
+pub fn ffmpeg_process_dir(path: &str, ffmpeg_path: &str, limitation: f32, terminal_output: &mut String) -> Result<String, Box<dyn std::error::Error>> {
+    terminal_output.push_str(&format!("Processing directory: {}\n", path));
     // check if path is a directory
     match fs::metadata(path) {
         Ok(metadata) => {
             if !metadata.is_dir() {
-                println!("Input is not a directory: {}", path);
+                let error_msg = format!("Input is not a directory: {}", path);
+                terminal_output.push_str(&format!("ERROR: {}\n", error_msg));
                 exit(12);
             }
         }
         Err(_) => {
-            println!("Directory not found: {}", path);
+            let error_msg = format!("Directory not found: {}", path);
+            terminal_output.push_str(&format!("ERROR: {}\n", error_msg));
             exit(11);
         }
     }
     // get all files in the directory
     let files = fs::read_dir(path).expect("Failed to read directory");
+    let mut processed_count = 0;
     for file in files {
         let entry = file.expect("Failed to read entry");
         let file_path = entry.path();
         // if file is not .mp3 file, in the future more formats would be supported
         if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "mp3") {
-            ffmpeg_process(file_path.to_str().unwrap(), ffmpeg_path, limitation)?;
+            terminal_output.push_str(&format!("Processing file {} in directory...\n", file_path.file_name().unwrap().to_str().unwrap()));
+            match ffmpeg_process(file_path.to_str().unwrap(), ffmpeg_path, limitation, terminal_output) {
+                Ok(_) => processed_count += 1,
+                Err(e) => {
+                    terminal_output.push_str(&format!("Failed to process {}: {}\n", file_path.display(), e));
+                }
+            }
         }
-
     }
+    terminal_output.push_str(&format!("Directory processing completed. Processed {} files.\n", processed_count));
     /*return*/Ok(path.to_string())
 }

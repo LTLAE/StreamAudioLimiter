@@ -133,12 +133,17 @@ pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32, terminal_o
     terminal_output.push_str(&format!("Starting normalization to {} LKFS...\n", limitation));
     let normalization_result = std::process::Command::new(ffmpeg_path)
         .args([
+            "-y", // overwrite output if exists
             "-i", original_path.to_str().unwrap(),  // input path
             "-af",
             &format!(
                 "loudnorm=I={limitation}:TP=-1.5:LRA=11:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset=0:linear=true",
                 loudness.input_i, loudness.input_tp, loudness.input_lra, loudness.input_thresh
             ),
+            "-vn", // no video
+            "-acodec", "libmp3lame",
+            "-ar", "44100",
+            "-ac", "2",
             path.to_str().unwrap(), // output path
         ])
         .output()?;

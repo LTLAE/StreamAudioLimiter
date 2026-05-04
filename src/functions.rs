@@ -142,8 +142,6 @@ pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32, terminal_o
             ),
             "-vn", // no video
             "-acodec", "libmp3lame",
-            "-ar", "44100",
-            "-ac", "2",
             path.to_str().unwrap(), // output path
         ])
         .output()?;
@@ -159,8 +157,18 @@ pub fn ffmpeg_process(path: &str, ffmpeg_path: &str, limitation: f32, terminal_o
 
 }
 
-pub fn ffmpeg_process_dir(path: &str, ffmpeg_path: &str, limitation: f32, terminal_output: &mut String) -> Result<String, Box<dyn std::error::Error>> {
+pub fn ffmpeg_process_dir<F>(
+    path: &str,
+    ffmpeg_path: &str,
+    limitation: f32,
+    terminal_output: &mut String,
+    mut report_progress: F,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: FnMut(f32, &str, &str),
+{
     terminal_output.push_str(&format!("Processing directory: {}\n", path));
+    report_progress(0.0, &format!("Processing folder: {}", path), terminal_output.as_str());
     // check if path is a directory
     match fs::metadata(path) {
         Ok(metadata) => {
@@ -177,22 +185,46 @@ pub fn ffmpeg_process_dir(path: &str, ffmpeg_path: &str, limitation: f32, termin
         }
     }
     // get all files in the directory
-    let files = fs::read_dir(path).expect("Failed to read directory");
+    let files: Vec<_> = fs::read_dir(path)?
+        .filter_map(|file| file.ok())
+        .map(|entry| entry.path())
+        .filter(|file_path| file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "mp3"))
+        .collect();
+
+    let total_files = files.len();
     let mut processed_count = 0;
-    for file in files {
-        let entry = file.expect("Failed to read entry");
-        let file_path = entry.path();
-        // if file is not .mp3 file, in the future more formats would be supported
-        if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "mp3") {
-            terminal_output.push_str(&format!("Processing file {} in directory...\n", file_path.file_name().unwrap().to_str().unwrap()));
-            match ffmpeg_process(file_path.to_str().unwrap(), ffmpeg_path, limitation, terminal_output) {
-                Ok(_) => processed_count += 1,
-                Err(e) => {
-                    terminal_output.push_str(&format!("Failed to process {}: {}\n", file_path.display(), e));
-                }
+
+    if total_files == 0 {
+        terminal_output.push_str("No mp3 files found in directory.\n");
+        report_progress(1.0, "No mp3 files found in directory.", terminal_output.as_str());
+        return Ok(path.to_string());
+    }
+
+    for file_path in files {
+        terminal_output.push_str(&format!("Processing file {} in directory...\n", file_path.file_name().unwrap().to_str().unwrap()));
+        report_progress(
+            processed_count as f32 / total_files as f32,
+            &format!(
+                "Processing {} ({}/{})",
+                file_path.file_name().unwrap().to_string_lossy(),
+                processed_count + 1,
+                total_files
+            ),
+            terminal_output.as_str(),
+        );
+        match ffmpeg_process(file_path.to_str().unwrap(), ffmpeg_path, limitation, terminal_output) {
+            Ok(_) => processed_count += 1,
+            Err(e) => {
+                terminal_output.push_str(&format!("Failed to process {}: {}\n", file_path.display(), e));
             }
         }
+        report_progress(
+            processed_count as f32 / total_files as f32,
+            &format!("Processed {} / {}", processed_count, total_files),
+            terminal_output.as_str(),
+        );
     }
     terminal_output.push_str(&format!("Directory processing completed. Processed {} files.\n", processed_count));
+    report_progress(1.0, &format!("Processed {} files.", processed_count), terminal_output.as_str());
     /*return*/Ok(path.to_string())
 }

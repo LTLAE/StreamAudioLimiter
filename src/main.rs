@@ -1,11 +1,21 @@
 #![windows_subsystem = "windows"]
 mod functions;
-use std::string::ToString;
 use eframe::egui;
 use rfd::FileDialog;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use std::string::ToString;
 use which;
 
 #[derive(Default)]
+struct ProcessingState {
+    message: String,
+    terminal_output: String,
+    progress: f32,
+    done: bool,
+}
+
 struct MainWindow {
     ffmpeg_path: String,
     selected_path: Option<String>,
@@ -13,10 +23,13 @@ struct MainWindow {
     message: String,
     file_node_type: String,
     terminal_output: String, // New field to store terminal outputs
+    progress: f32,
+    is_processing: bool,
+    processing_state: Option<Arc<Mutex<ProcessingState>>>,
 }
 
-impl MainWindow {
-    fn new() -> Self {
+impl Default for MainWindow {
+    fn default() -> Self {
         Self {
             ffmpeg_path: "Empty for ffmpeg in PATH".to_string(),
             selected_path: None,
@@ -24,17 +37,34 @@ impl MainWindow {
             message: String::new(),
             file_node_type: String::new(),
             terminal_output: String::new(), // Initialize the new field
+            progress: 0.0,
+            is_processing: false,
+            processing_state: None,
         }
     }
 }
 
 impl eframe::App for MainWindow {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(processing_state) = &self.processing_state {
+            if let Ok(state) = processing_state.lock() {
+                self.message = state.message.clone();
+                self.terminal_output = state.terminal_output.clone();
+                self.progress = state.progress;
+                if state.done {
+                    self.is_processing = false;
+                }
+            }
+        }
+        if self.is_processing {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // row: select ffmpeg binary
             ui.horizontal(|ui| {
                 // ffmpeg binary selection button
-                if ui.button("Select ffmpeg binary").clicked() {
+                if ui.add_enabled(!self.is_processing, egui::Button::new("Select ffmpeg binary")).clicked() {
                     if let Some(path) = FileDialog::new().pick_file() {
                         self.ffmpeg_path = path.display().to_string();
                     }
@@ -47,14 +77,14 @@ impl eframe::App for MainWindow {
             // row: select file or folder
             ui.horizontal(|ui| {
                 // file selection button
-                if ui.button("Select file").clicked() {
+                if ui.add_enabled(!self.is_processing, egui::Button::new("Select file")).clicked() {
                     if let Some(path) = FileDialog::new().pick_file() {
                         self.selected_path = Some(path.display().to_string());
                         self.file_node_type = "file".to_string();
                     }
                 }
                 // folder selection button
-                if ui.button("Select folder").clicked() {
+                if ui.add_enabled(!self.is_processing, egui::Button::new("Select folder")).clicked() {
                     if let Some(path) = FileDialog::new().pick_folder() {
                         self.selected_path = Some(path.display().to_string());
                         self.file_node_type = "folder".to_string();
@@ -79,76 +109,125 @@ impl eframe::App for MainWindow {
             });
             // start button and message
             ui.horizontal(|ui| {
-                if ui.button("Start processing").clicked() {
-                    self.terminal_output.clear(); // Clear previous output
-                    self.terminal_output.push_str("=== Processing Started ===\n");
+                if ui.add_enabled(!self.is_processing, egui::Button::new("Start processing")).clicked() {
+                    let processing_state = Arc::new(Mutex::new(ProcessingState {
+                        message: "Starting processing...".to_string(),
+                        terminal_output: "=== Processing Started ===\n".to_string(),
+                        progress: 0.0,
+                        done: false,
+                    }));
+                    self.processing_state = Some(processing_state.clone());
+                    self.is_processing = true;
+                    self.progress = 0.0;
 
-                    println!("Start button clicked. Path: {}, {}, Limitation: {}LKFS", &self.selected_path.as_deref().unwrap_or("-14"), self.file_node_type, self.limitation);
-                    // limitation <- parse input text
-                    // when it is not empty (empty means default: -14.0)
-                    if self.limitation.is_empty() {
-                        self.limitation = "-14".to_string(); // default value
-                    };
-                    // check if limitation is a valid number
-                    if let Err(err) = self.limitation.parse::<f32>() {
-                        self.message = format!("Invalid input for loudness limitation. Please enter a valid number. {}", err).to_string();
-                        self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
-                        return;
-                    }
-                    // check if ffmpeg path is set
-                    if self.ffmpeg_path.is_empty() {
-                        // check if ffmpeg is in PATH
-                        if let Ok(ffmpeg_path) = which::which("ffmpeg") {
-                            self.ffmpeg_path = ffmpeg_path.display().to_string();
-                            self.terminal_output.push_str(&format!("Found ffmpeg in PATH: {}\n", self.ffmpeg_path));
+                    let selected_path = self.selected_path.clone();
+                    let file_node_type = self.file_node_type.clone();
+                    let limitation = self.limitation.clone();
+                    let ffmpeg_path = self.ffmpeg_path.clone();
+
+                    thread::spawn(move || {
+                        let update_state = |message: String, terminal_output: String, progress: f32, done: bool| {
+                            if let Ok(mut state) = processing_state.lock() {
+                                state.message = message;
+                                state.terminal_output = terminal_output;
+                                state.progress = progress;
+                                state.done = done;
+                            }
+                        };
+
+                        let limitation = if limitation.is_empty() { "-14".to_string() } else { limitation };
+                        let limitation = match limitation.parse::<f32>() {
+                            Ok(value) => value,
+                            Err(err) => {
+                                update_state(
+                                    format!("Invalid input for loudness limitation. Please enter a valid number. {}", err),
+                                    format!("=== Processing Started ===\nERROR: Invalid input for loudness limitation. Please enter a valid number. {}\n", err),
+                                    0.0,
+                                    true,
+                                );
+                                return;
+                            }
+                        };
+
+                        let ffmpeg_path = if ffmpeg_path.is_empty() || ffmpeg_path == "Empty for ffmpeg in PATH" {
+                            match which::which("ffmpeg") {
+                                Ok(path) => path.display().to_string(),
+                                Err(_) => {
+                                    update_state(
+                                        "Please select ffmpeg binary.".to_string(),
+                                        "=== Processing Started ===\nERROR: Please select ffmpeg binary.\n".to_string(),
+                                        0.0,
+                                        true,
+                                    );
+                                    return;
+                                }
+                            }
                         } else {
-                            self.message = "Please select ffmpeg binary.".to_string();
-                            self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
-                        }
-                    }
-                    // check if selected path is empty, file or folder
-                    if let Some(path) = &self.selected_path {
-                        if self.file_node_type == "file" {
-                            // process single file
-                            println!("Processing file: {}", path);
-                            self.message = format!("Processing file: {}", path);
-                            self.terminal_output.push_str(&format!("Processing file: {}\n", path));
-                            match functions::ffmpeg_process(path, &self.ffmpeg_path, self.limitation.parse::<f32>().unwrap(), &mut self.terminal_output) {
+                            ffmpeg_path
+                        };
+
+                        let Some(path) = selected_path else {
+                            update_state(
+                                "No file or folder selected.".to_string(),
+                                "=== Processing Started ===\nERROR: No file or folder selected.\n".to_string(),
+                                0.0,
+                                true,
+                            );
+                            return;
+                        };
+
+                        if file_node_type == "file" {
+                            let mut terminal_output = format!("=== Processing Started ===\nProcessing file: {}\n", path);
+                            match functions::ffmpeg_process(&path, &ffmpeg_path, limitation, &mut terminal_output) {
                                 Ok(val) => {
-                                    self.message = format!("Success: {}", val.to_string());
-                                    self.terminal_output.push_str(&format!("SUCCESS: Processed {}\n", val));
+                                    terminal_output.push_str(&format!("SUCCESS: Processed {}\n", val));
+                                    update_state(format!("Success: {}", val), terminal_output, 1.0, true);
                                 }
                                 Err(err) => {
-                                    self.message = format!("Error: {}", err.to_string());
-                                    self.terminal_output.push_str(&format!("ERROR: {}\n", err));
+                                    terminal_output.push_str(&format!("ERROR: {}\n", err));
+                                    update_state(format!("Error: {}", err), terminal_output, 1.0, true);
                                 }
-                            };   // just unwrap limitation here, because we already checked if limitation is a valid number
-                        } else if self.file_node_type == "folder" {
-                            // process all files in folder
-                            println!("Processing folder: {}", path);
-                            self.message = format!("Processing folder: {}", path);
-                            self.terminal_output.push_str(&format!("Processing folder: {}\n", path));
-                            match functions::ffmpeg_process_dir(path, &self.ffmpeg_path, self.limitation.parse::<f32>().unwrap(), &mut self.terminal_output){
-                                Ok(val) => {
-                                    self.message = format!("Success: {}", val.to_string());
-                                    self.terminal_output.push_str(&format!("SUCCESS: Processed folder {}\n", val));
+                            }
+                        } else if file_node_type == "folder" {
+                            let mut terminal_output = format!("=== Processing Started ===\nProcessing folder: {}\n", path);
+                            let message = format!("Processing folder: {}", path);
+                            update_state(message.clone(), terminal_output.clone(), 0.0, false);
+                            match functions::ffmpeg_process_dir(
+                                &path,
+                                &ffmpeg_path,
+                                limitation,
+                                &mut terminal_output,
+                                |progress, status, output| {
+                                    update_state(status.to_string(), output.to_string(), progress, false);
                                 },
-                                Err(err) => {
-                                    self.message = format!("Error: {}", err.to_string());
-                                    self.terminal_output.push_str(&format!("ERROR: {}\n", err));
+                            ) {
+                                Ok(val) => {
+                                    terminal_output.push_str(&format!("SUCCESS: Processed folder {}\n", val));
+                                    update_state(format!("Success: {}", val), terminal_output, 1.0, true);
                                 }
-                            };  // same as above
+                                Err(err) => {
+                                    terminal_output.push_str(&format!("ERROR: {}\n", err));
+                                    update_state(format!("Error: {}", err), terminal_output, 1.0, true);
+                                }
+                            }
                         } else {
-                            self.message = "Please selected a valid file or folder.".to_string();
-                            self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
+                            update_state(
+                                "Please selected a valid file or folder.".to_string(),
+                                "=== Processing Started ===\nERROR: Please selected a valid file or folder.\n".to_string(),
+                                0.0,
+                                true,
+                            );
                         }
-                    } else {
-                        self.message = "No file or folder selected.".to_string();
-                        self.terminal_output.push_str(&format!("ERROR: {}\n", self.message));
-                    }
+                    });
                 }
                 ui.label(&self.message);
             });
+
+            let progress_width = (ui.available_width() - 8.0).max(0.0);
+            ui.add_sized(
+                [progress_width, 20.0],
+                egui::ProgressBar::new(self.progress).show_percentage(),
+            );
 
             // Terminal output display box
             ui.separator();
